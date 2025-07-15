@@ -1,0 +1,263 @@
+---
+title: "Analysis of News Headlines"
+author: "Dipankar Lahiri"
+date: "2025-07-15"
+output: html_document
+---
+
+# Data Loading
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(readxl)
+library(lubridate)
+library(dplyr)
+library(tidyr) 
+library(scales)
+library(plotly)
+library(ggplot2)
+library(htmlwidgets)
+library(broom)
+library(splines)
+library(effects)
+library(mgcv)
+
+df <- read_excel("Headlines 22 Apr to 16 May.xlsx", sheet = "Emotions")  
+
+glimpse(df)                   
+sum(is.na(df$Headline))  
+df <- df %>% mutate(Date = as.Date(Date))
+
+```
+
+# EMOTION - Basic prevalence checks - Emotion means across dataset, emotion means across Twitter vs Website
+
+```{r}
+
+emotion_cols <- c("Anger","Fear","Joy","Sadness","Trust","Surprise",
+                  "Disgust","Anticipation","Nostalgia","Pride","Shame","Vindication")
+
+# Pivot longer - Collapse 12 emotion columns into two new columns: Emotion, Score.
+
+df_long <- df %>% 
+  pivot_longer(cols = all_of(emotion_cols),
+               names_to = "Emotion",
+               values_to = "Score")
+
+emotion_means <- df_long %>% 
+  group_by(Emotion) %>% 
+  summarise(mean_score = mean(Score, na.rm = TRUE)) %>% 
+  arrange(desc(mean_score))
+
+df <- df %>%
+  mutate(SourceType = case_when(
+    str_starts(Source, "Twitter") ~ "Twitter",
+    TRUE ~ "Website"
+  ))
+
+emotion_by_source <- df_long %>%
+  mutate(SourceType = case_when(
+    str_starts(Source, "Twitter") ~ "Twitter",
+    TRUE ~ "Website"
+  )) %>%
+  group_by(SourceType, Emotion) %>%
+  summarise(mean_score = mean(Score, na.rm = TRUE)) %>%
+  pivot_wider(names_from = Emotion, values_from = mean_score)
+
+```
+
+# EMOTION + TIME - Emotional timeline
+
+```{r, fig.width=12, fig.height=8}
+
+df_long %>% 
+  group_by(Date, Emotion) %>% 
+  summarise(day_score = mean(Score), .groups = "drop") %>% 
+  ggplot(aes(Date, day_score, colour = Emotion)) +
+  geom_line() +
+  facet_wrap(~Emotion, scales = "free_y") +
+  scale_x_date(date_breaks = "3 days",      # one tick every 3rd day
+               date_labels = "%d‑%b") +     # e.g. 22‑Apr
+  theme_minimal(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+
+```
+
+```{r, echo = FALSE, message = FALSE}
+
+# 1. Make and save a high‑res PNG for each emotion
+walk(emotion_cols, function(em){
+
+  p <- df_long %>% 
+    filter(Emotion == em) %>% 
+    group_by(Date) %>% 
+    summarise(day_score = mean(Score, na.rm = TRUE), .groups = "drop") %>% 
+    ggplot(aes(Date, day_score)) +
+      geom_line(colour = "#2c7fb8", linewidth = 0.8) +
+      labs(title = em, x = NULL, y = "Mean daily score") +
+      theme_minimal(base_size = 12)
+
+  ggsave(filename = paste0("emotion_", em, ".png"),
+         plot = p, width = 6, height = 4, dpi = 300)
+})
+
+# 2. Build one interactive dashboard (12 sub‑plots) and save to HTML
+plot_list <- map(emotion_cols, function(em){
+
+  p <- df_long %>% 
+    filter(Emotion == em) %>% 
+    group_by(Date) %>% 
+    summarise(day_score = mean(Score, na.rm = TRUE), .groups = "drop") %>% 
+    ggplot(aes(Date, day_score)) +
+      geom_line(colour = "#e34a33") +
+      labs(title = em, x = NULL, y = NULL) +
+      theme_minimal(base_size = 10)
+
+  ggplotly(p) %>% layout(showlegend = FALSE)
+})
+
+interactive_grid <- subplot(plot_list, nrows = 4, shareX = TRUE, shareY = FALSE)
+saveWidget(interactive_grid, "emotion_dashboard.html", selfcontained = TRUE)
+
+```
+
+# EMOTION + ENGAGEMENT - Engagement metrics
+
+```{r}
+
+eng_df <- df %>% 
+  filter(!is.na(Views) | !is.na(Retweets) | !is.na(Likes) | !is.na(Replies))
+
+# Check distribution with histograms for one emotion and one engagement metric as example
+ggplot(eng_df, aes(x = Anger)) + geom_histogram(bins = 30) + ggtitle("Anger distribution")
+ggplot(eng_df, aes(x = Views)) + geom_histogram(bins = 30) + ggtitle("Views distribution")
+
+# Shapiro-Wilk normality test for a sample variable (only works well on <5000 samples)
+shapiro.test(df$Anger)
+shapiro.test(df$Views)
+
+```
+
+# Both p-values are tiny (< 0.05), which means neither Anger nor Views is normally distributed. Therefore, using Spearman correlation throughout engagement vs emotion analysis. It’s nonparametric and handles skewed data better.
+
+```{r}
+
+emotion_vs_eng <- map_dfr(emotion_cols, function(e) {
+  map_dfr(c("Views", "Retweets", "Likes", "Replies"), function(kpi) {
+    corr_val <- cor(eng_df[[e]], eng_df[[kpi]], use = "pairwise.complete.obs", method = "spearman")
+    tibble(Emotion = e, KPI = kpi, corr = corr_val)
+  })
+})
+
+# Sort by absolute correlation descending
+emotion_vs_eng_sorted <- emotion_vs_eng %>% arrange(desc(abs(corr)))
+
+print(emotion_vs_eng_sorted)
+
+
+```
+
+```{r}
+
+cor.test(eng_df$Trust, eng_df$Views, method = "spearman")
+cor.test(eng_df$Shame, eng_df$Views, method = "spearman")
+cor.test(eng_df$Sadness, eng_df$Retweets, method = "spearman")
+cor.test(eng_df$Disgust, eng_df$Retweets, method = "spearman")
+
+```
+
+```{r, message=FALSE}
+
+# ----- 0. Define cutoffs and create binary flags for high engagement -----
+view_cut  <- quantile(eng_df$Views, 0.9, na.rm = TRUE)
+like_cut  <- quantile(eng_df$Likes, 0.9, na.rm = TRUE)
+retweet_cut <- quantile(eng_df$Retweets, 0.9, na.rm = TRUE)
+reply_cut <- quantile(eng_df$Replies, 0.9, na.rm = TRUE)
+
+eng_df <- eng_df %>% 
+  mutate(
+    high_views = as.integer(Views >= view_cut),
+    high_likes = as.integer(Likes >= like_cut),
+    high_retweets = as.integer(Retweets >= retweet_cut),
+    high_replies = as.integer(Replies >= reply_cut)
+  )
+
+# ----- 1. Logistic model formula -----
+form <- as.formula(
+  paste("high_views ~ SourceType +", paste(emotion_cols, collapse = " + "))
+)
+
+# ----- 2. Fit models for each engagement metric -----
+models <- list(
+  views = glm(high_views ~ SourceType + ., data = select(eng_df, high_views, SourceType, all_of(emotion_cols)), family = binomial),
+  likes = glm(high_likes ~ SourceType + ., data = select(eng_df, high_likes, SourceType, all_of(emotion_cols)), family = binomial),
+  retweets = glm(high_retweets ~ SourceType + ., data = select(eng_df, high_retweets, SourceType, all_of(emotion_cols)), family = binomial),
+  replies = glm(high_replies ~ SourceType + ., data = select(eng_df, high_replies, SourceType, all_of(emotion_cols)), family = binomial)
+)
+
+# ----- 3. Tidy and combine results -----
+results <- map_df(names(models), function(metric) {
+  tidy(models[[metric]], exponentiate = TRUE) %>%
+    mutate(
+      Metric = metric,
+      estimate = round(estimate, 3),
+      p.value = signif(p.value, 3)
+    )
+})
+
+print(results)
+
+
+```
+
+```{r}
+
+# 1. z‑score each metric and build a composite
+eng_df <- eng_df %>%
+  mutate(
+    across(c(Views, Likes, Retweets, Replies), scale, .names = "{.col}_z"),
+    EngagedScore = rowMeans(across(ends_with("_z")), na.rm = TRUE)
+  )
+
+# 2. flag the top 10 % composite as 'high engagement'
+cutoff <- quantile(eng_df$EngagedScore, 0.90, na.rm = TRUE)
+eng_df <- eng_df %>% mutate(high_engage = as.integer(EngagedScore >= cutoff))
+
+# 3. run a logistic model with emotions (+ SourceType as control)
+form <- as.formula(
+  paste("high_engage ~ SourceType +", paste(emotion_cols, collapse = " + "))
+)
+model_composite <- glm(form, data = eng_df, family = binomial)
+
+broom::tidy(model_composite, exponentiate = TRUE)
+
+
+```
+
+# EMOTION + TIME + ENGAGEMENT
+
+```{r}
+
+# Day index (keep this)
+eng_df <- eng_df %>% mutate(Day = as.numeric(Date - min(Date) + 1))
+
+gam_mod <- gam(
+  EngagedScore ~ s(Day) +                              # baseline time curve
+    s(Day, by = Surprise) +                            # emotion‑specific curves
+    s(Day, by = Disgust)  +
+    s(Day, by = Nostalgia) +
+    s(Day, by = Pride)   +
+    SourceType +
+    Anger + Fear + Joy + Sadness + Trust + Anticipation + Shame + Vindication,
+  data   = eng_df,
+  method = "REML"
+)
+
+summary(gam_mod)      # view EDF and p‑values for each s(Day,by=Emotion) term
+plot(gam_mod, pages = 1)   # smooth curves with CIs
+
+
+```

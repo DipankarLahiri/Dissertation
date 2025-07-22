@@ -733,26 +733,44 @@ list(
 
 ```{r}
 
-peacetime_raw <- read_excel("~/Desktop/Peacetime news.xlsx", col_names = "Headline")
+# Load peacetime data
+peacetime <- readxl::read_excel("../../Peacetime_with_scores_emotions_themes.xlsx")
 
-# 2. Classify emotions and themes using your BERT model
-peacetime_raw$Emotion <- predict_emotion(peacetime_raw$Headline)
-peacetime_raw$Theme <- predict_theme(peacetime_raw$Headline)
+# Subset just the emotion columns
+emotion_cols <- c("Anger", "Fear", "Sadness", "Trust", "Surprise", "Disgust", 
+                  "Anticipation", "Shame", "Vindication", "Joy", "Pride", "Nostalgia")
+peacetime_emotions <- peacetime[, emotion_cols]
 
-# 3. Add metadata
-peacetime_raw$Source <- "Unknown"  # or assign if you can infer it
-peacetime_raw$Period <- "Peace"
+# Summary stats
+round(colMeans(peacetime_emotions, na.rm = TRUE), 2)
 
-# 4. Label 2025 data
-eng_df$Period <- "Conflict"
-
-# 5. Merge
-combined_df <- bind_rows(
-  select(eng_df, Headline, Emotion, Theme, Source, Period),
-  select(peacetime_raw, Headline, Emotion, Theme, Source, Period)
-)
-
-# 6. Now you're ready for analysis: emotion ~ Period + (1|Source)
+# Correlation matrix
+round(cor(peacetime_emotions, use = "pairwise.complete.obs"), 2)
 
 ```
 
+```{r}
+
+theme_cols <- c("Nationalism", "Religion", "Violence", "Conspiracy", "Political figures", 
+                "Statistics", "History", "Global Affairs", "Hero worship", 
+                "Gender", "Humour", "Bullying")
+peacetime_themes <- peacetime[, theme_cols]
+
+# Summary
+round(colMeans(peacetime_themes, na.rm = TRUE), 2)
+
+# Correlations
+round(cor(peacetime_themes, use = "pairwise.complete.obs"), 2)
+
+```
+
+
+```{r}
+
+# Combine for correlation matrix between emotions and themes
+et_corr <- cor(peacetime_emotions, peacetime_themes, use = "pairwise.complete.obs")
+round(et_corr, 2)
+
+pheatmap(et_corr, cluster_rows = TRUE, cluster_cols = TRUE, display_numbers = TRUE)
+
+```
